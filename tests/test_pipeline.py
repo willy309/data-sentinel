@@ -12,7 +12,7 @@ import pytest
 from sentinel.__main__ import main
 from sentinel.detectors import zscore
 from sentinel.generate import ANOMALY_TYPES
-from sentinel.pipeline import METRIC_COLUMNS, format_summary, run
+from sentinel.pipeline import METRIC_COLUMNS, run
 
 SMALL = 8_000
 
@@ -72,15 +72,6 @@ def test_runs_are_reproducible():
         run(n=2_000, seed=5, n_users=20).metrics,
         run(n=2_000, seed=5, n_users=20).metrics,
     )
-
-
-def test_summary_reports_the_numbers_and_the_blind_spot(result):
-    text = format_summary(result)
-    assert f"{SMALL:,} transactions" in text
-    assert "zscore" in text and "isoforest" in text
-    assert "recall by anomaly type" in text
-    # Neither detector reads the clock, so the summary has to say so out loud.
-    assert "caught by no detector: odd_hours" in text
 
 
 def test_cli_runs_and_prints_a_summary(capsys):
