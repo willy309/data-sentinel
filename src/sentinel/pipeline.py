@@ -5,9 +5,14 @@ with. The scoring half matters more than the orchestration half: a detector that
 never measured against the labels is just a random flag generator with good intentions,
 and the per-anomaly-type breakdown is what stops a single headline number from hiding
 which kinds of fraud the pipeline is blind to.
+
+Rendering lives in :mod:`sentinel.report`, not here. Keeping the run free of formatting
+is what lets the console table and the JSON artifact be built from one object without
+either becoming the other's special case.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import pandas as pd
 from sklearn.metrics import f1_score, precision_score, recall_score
@@ -15,6 +20,7 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 from sentinel.detectors import isoforest, zscore
 from sentinel.features import add_features
 from sentinel.generate import generate_transactions
+from sentinel.monitoring import log, stage
 
 METRIC_COLUMNS: tuple[str, ...] = ("flagged", "precision", "recall", "f1")
 
@@ -30,11 +36,16 @@ class RunResult:
         recall_by_type: One row per injected anomaly type, one column per detector.
             Precision has no meaning per type — a false positive belongs to no type — so
             only recall is broken down.
+        params: The arguments this run was called with, carried along so a report can
+            state what produced it and a reader can reproduce it.
+        timings: Wall-clock milliseconds per stage.
     """
 
     frame: pd.DataFrame
     metrics: pd.DataFrame
     recall_by_type: pd.DataFrame
+    params: dict[str, Any] = field(default_factory=dict)
+    timings: dict[str, float] = field(default_factory=dict)
 
 
 def run(
@@ -60,20 +71,39 @@ def run(
     Returns:
         A :class:`RunResult`.
     """
-    frame = add_features(
-        generate_transactions(n, seed=seed, n_users=n_users, anomaly_rate=anomaly_rate)
-    )
-    flags = {
-        "zscore": zscore.detect(frame, threshold=zscore_threshold),
-        "isoforest": isoforest.detect(frame, contamination=contamination, seed=seed),
+    params: dict[str, Any] = {
+        "n": n,
+        "seed": seed,
+        "n_users": n_users,
+        "anomaly_rate": anomaly_rate,
+        "zscore_threshold": zscore_threshold,
+        "contamination": contamination,
     }
-    for name, flag in flags.items():
-        frame[f"{name}_flag"] = flag
+    timings: dict[str, float] = {}
+    log("run.start", **params)
 
+    with stage("generate", timings):
+        frame = generate_transactions(n, seed=seed, n_users=n_users, anomaly_rate=anomaly_rate)
+    with stage("features", timings):
+        frame = add_features(frame)
+    with stage("detect", timings):
+        flags = {
+            "zscore": zscore.detect(frame, threshold=zscore_threshold),
+            "isoforest": isoforest.detect(frame, contamination=contamination, seed=seed),
+        }
+        for name, flag in flags.items():
+            frame[f"{name}_flag"] = flag
+    with stage("score", timings):
+        metrics = _score(frame["is_anomaly"], flags)
+        recall_by_type = _recall_by_type(frame, flags)
+
+    log("run.complete", rows=len(frame), flagged={k: int(v.sum()) for k, v in flags.items()})
     return RunResult(
         frame=frame,
-        metrics=_score(frame["is_anomaly"], flags),
-        recall_by_type=_recall_by_type(frame, flags),
+        metrics=metrics,
+        recall_by_type=recall_by_type,
+        params=params,
+        timings=timings,
     )
 
 
@@ -101,28 +131,3 @@ def _recall_by_type(frame: pd.DataFrame, flags: dict[str, pd.Series]) -> pd.Data
     return pd.DataFrame(
         {name: anomalies.groupby("anomaly_type")[f"{name}_flag"].mean() for name in flags}
     )
-
-
-def format_summary(result: RunResult) -> str:
-    """Render a run as the console summary, kept a plain string so it can be tested.
-
-    Phase 4 replaces this with a proper report module; until then it exists so the CLI
-    has something honest to print rather than a bare frame dump.
-    """
-    frame = result.frame
-    anomalies = int(frame["is_anomaly"].sum())
-    lines = [
-        f"data-sentinel — {len(frame):,} transactions, {frame['user_id'].nunique():,} users",
-        f"{anomalies:,} injected anomalies ({anomalies / len(frame):.2%})",
-        "",
-        result.metrics.round(3).to_string(),
-        "",
-        "recall by anomaly type",
-        result.recall_by_type.round(3).to_string(),
-    ]
-    # Naming the blind spots outright: a type nothing catches is the most useful line in
-    # the report and the easiest one to miss in a table of small numbers.
-    missed = result.recall_by_type.index[result.recall_by_type.max(axis=1) == 0]
-    if len(missed):
-        lines += ["", f"caught by no detector: {', '.join(missed)}"]
-    return "\n".join(lines)

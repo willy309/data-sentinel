@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Career-campaign records — contain personal + client-identifying detail.
+# This repo is PUBLIC. These must never be committed here.
+PROJECT_STATUS_EXPORT.md
+FULL_CHAT_RECORD*.md
+NOTES_Apple_Campaign*.md
+apple-campaign/
+
+# Run artifacts are evidence of a local run, not source.
+reports/
